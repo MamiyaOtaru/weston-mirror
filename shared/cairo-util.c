@@ -372,12 +372,12 @@ theme_set_background_source(struct theme *t, cairo_t *cr, uint32_t flags)
 
 	if (flags & THEME_FRAME_ACTIVE) {
 		pattern = cairo_pattern_create_linear(16, 16, 16, 112);
-		cairo_pattern_add_color_stop_rgb(pattern, 0.0, 1.0, 1.0, 1.0);
-		cairo_pattern_add_color_stop_rgb(pattern, 0.2, 0.8, 0.8, 0.8);
+		cairo_pattern_add_color_stop_rgb(pattern, 0.0, 0.08, 0.09, 0.098);
+		cairo_pattern_add_color_stop_rgb(pattern, 0.2, 0.16, 0.175, 0.191);
 		cairo_set_source(cr, pattern);
 		cairo_pattern_destroy(pattern);
 	} else {
-		cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, 1);
+		cairo_set_source_rgba(cr, 0.165, 0.18, 0.196, 1);
 	}
 }
 
@@ -567,14 +567,14 @@ theme_render_frame(struct theme *t,
 
 		if (flags & THEME_FRAME_ACTIVE) {
 			cairo_move_to(cr, x + 1, y  + 1);
-			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_set_source_rgb(cr, 0, 0, 0);
 			SHOW_TEXT(cr);
 			cairo_move_to(cr, x, y);
-			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_set_source_rgb(cr, 1, 1, 1);
 			SHOW_TEXT(cr);
 		} else {
 			cairo_move_to(cr, x, y);
-			cairo_set_source_rgb(cr, 0.4, 0.4, 0.4);
+			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 			SHOW_TEXT(cr);
 		}
 	}

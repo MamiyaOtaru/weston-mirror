@@ -232,11 +232,11 @@ frame_button_repaint(struct frame_button *button, cairo_t *cr)
 		cairo_stroke_preserve(cr);
 
 		if (button->press_count) {
-			cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);
+			cairo_set_source_rgb(cr, 0.08, 0.09, 0.098);
 		} else if (button->hover_count) {
-			cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+			cairo_set_source_rgb(cr, 0.21, 0.225, 0.241);
 		} else {
-			cairo_set_source_rgb(cr, 0.88, 0.88, 0.88);
+			cairo_set_source_rgb(cr, 0.16, 0.175, 0.191);
 		}
 
 		cairo_fill (cr);
