@@ -353,31 +353,19 @@ rail_client_SnapArrange_callback(bool freeOnly, void *arg)
 			snap_rect.y = snap->top;
 			snap_rect.width = snap->right - snap->left;
 			snap_rect.height = snap->bottom - snap->top;
-			/* SnapArrange PDU include window resize margin */
-			/* [MS-RDPERP] - v20200304 - 3.2.5.1.6 Processing Window Information Orders
-			    However, the Client Window Move PDU (section 2.2.2.7.4) and Client Window Snap PDU
-			    (section 2.2.2.7.5) do include resize margins in the window boundaries. */
-			snap_rect.x += rail_state->window_margin_left;
-			snap_rect.y += rail_state->window_margin_top;
-			snap_rect.width -= rail_state->window_margin_left +
-					   rail_state->window_margin_right;
-			snap_rect.height -= rail_state->window_margin_top +
-					    rail_state->window_margin_bottom;
 			to_weston_coordinate(peer_ctx,
 					     &snap_rect.x,
 					     &snap_rect.y,
 					     &snap_rect.width,
 					     &snap_rect.height);
-			if (is_window_shadow_remoting_disabled(peer_ctx)) {
-				/* offset window shadow area */
-				/* window_geometry here is last commited geometry */
-				api->get_window_geometry(surface,
-							 &geometry);
-				snap_rect.x -= geometry.x;
-				snap_rect.y -= geometry.y;
-				snap_rect.width += (surface->width - geometry.width);
-				snap_rect.height += (surface->height - geometry.height);
-			}
+			/* offset window shadow area as there is no shadow when snapped */
+			/* window_geometry here is last commited geometry */
+			api->get_window_geometry(surface,
+						 &geometry);
+			snap_rect.x -= geometry.x;
+			snap_rect.y -= geometry.y;
+			snap_rect.width += (surface->width - geometry.width);
+			snap_rect.height += (surface->height - geometry.height);
 			api->request_window_snap(surface,
 						 snap_rect.x,
 						 snap_rect.y,
@@ -433,22 +421,25 @@ rail_client_WindowMove_callback(bool freeOnly, void *arg)
 			windowMoveRect.y = windowMove->top;
 			windowMoveRect.width = windowMove->right - windowMove->left;
 			windowMoveRect.height = windowMove->bottom - windowMove->top;
-			/* WindowMove PDU include window resize margin */
-			/* [MS-RDPERP] - v20200304 - 3.2.5.1.6 Processing Window Information Orders
-			    However, the Client Window Move PDU (section 2.2.2.7.4) and Client Window Snap PDU
-			    (section 2.2.2.7.5) do include resize margins in the window boundaries. */
-			windowMoveRect.x += rail_state->window_margin_left;
-			windowMoveRect.y += rail_state->window_margin_top;
-			windowMoveRect.width -= rail_state->window_margin_left +
-						rail_state->window_margin_right;
-			windowMoveRect.height -= rail_state->window_margin_top +
-						 rail_state->window_margin_bottom;
+			if (!rail_state->isWindowSnapped) {
+				/* WindowMove PDU include window resize margin */
+				/* [MS-RDPERP] - v20200304 - 3.2.5.1.6 Processing Window Information Orders
+				    However, the Client Window Move PDU (section 2.2.2.7.4) and Client Window Snap PDU
+				    (section 2.2.2.7.5) do include resize margins in the window boundaries. */
+				windowMoveRect.x += rail_state->window_margin_left;
+				windowMoveRect.y += rail_state->window_margin_top;
+				windowMoveRect.width -= rail_state->window_margin_left +
+							rail_state->window_margin_right;
+				windowMoveRect.height -= rail_state->window_margin_top +
+							 rail_state->window_margin_bottom;
+			}
 			to_weston_coordinate(peer_ctx,
 					     &windowMoveRect.x,
 					     &windowMoveRect.y,
 					     &windowMoveRect.width,
 					     &windowMoveRect.height);
-			if (is_window_shadow_remoting_disabled(peer_ctx)) {
+			if (is_window_shadow_remoting_disabled(peer_ctx) ||
+				rail_state->isWindowSnapped) {
 				/* offset window shadow area */
 				/* window_geometry here is last commited geometry */
 				api->get_window_geometry(surface,
@@ -770,8 +761,8 @@ rail_client_ClientGetAppidReq_callback(bool freeOnly, void *arg)
 			goto Exit;
 		}
 
-		rdp_debug(b, "Client: ClientGetAppidReq: pid:%d appId:%s\n",
-			  (uint32_t)pid, appId);
+		rdp_debug(b, "Client: ClientGetAppidReq: pid:%d appId:%s WindowId:0x%x\n",
+			  (uint32_t)pid, appId, getAppidReq->windowId);
 		rdp_debug_verbose(b,
 				  "Client: ClientGetAppidReq: pid:%d imageName:%s\n",
 				  (uint32_t)pid, imageName);
@@ -1010,6 +1001,14 @@ rail_client_LanguageImeInfo_callback(bool freeOnly, void *arg)
 						__func__, new_keyboard_layout,
 						settings->KeyboardType,
 						settings->KeyboardSubType);
+
+                                rdp_debug_error(b, "%s: Resetting default keymap\n", __func__);
+                                keymap = xkb_keymap_new_from_names(peer_ctx->item.seat->compositor->xkb_context,
+                                                                   &peer_ctx->item.seat->compositor->xkb_names,
+                                                                   0);
+                                weston_seat_update_keymap(peer_ctx->item.seat, keymap);
+                                xkb_keymap_unref(keymap);
+                                settings->KeyboardLayout = new_keyboard_layout;
 			}
 		}
 	}
@@ -2094,34 +2093,37 @@ rdp_rail_update_window(struct weston_surface *surface,
 				  __func__, rail_state->window_id);
 	}
 
-	if (is_window_shadow_remoting_disabled(peer_ctx)) {
+	if (is_window_shadow_remoting_disabled(peer_ctx) ||
+		rail_state->isWindowSnapped) {
 		/* drop window shadow area */
 		api->get_window_geometry(surface, &geometry);
 
-		/* calculate window margin from input extents */
-		if (geometry.x > max(0, surface->input.extents.x1))
-			window_margin_left = geometry.x -
+		if (is_window_shadow_remoting_disabled(peer_ctx)) {
+			/* calculate window margin from input extents */
+			if (geometry.x > max(0, surface->input.extents.x1))
+				window_margin_left = geometry.x -
 					     max(0, surface->input.extents.x1);
-		window_margin_left = max(window_margin_left,
-					 RDP_RAIL_WINDOW_RESIZE_MARGIN);
+			window_margin_left = max(window_margin_left,
+						 RDP_RAIL_WINDOW_RESIZE_MARGIN);
 
-		if (geometry.y > max(0, surface->input.extents.y1))
-			window_margin_top = geometry.y -
-					    max(0, surface->input.extents.y1);
-		window_margin_top = max(window_margin_top,
-					RDP_RAIL_WINDOW_RESIZE_MARGIN);
+			if (geometry.y > max(0, surface->input.extents.y1))
+				window_margin_top = geometry.y -
+						    max(0, surface->input.extents.y1);
+			window_margin_top = max(window_margin_top,
+						RDP_RAIL_WINDOW_RESIZE_MARGIN);
 
-		if (min(surface->input.extents.x2, surface->width) > (geometry.x + geometry.width))
-			window_margin_right = min(surface->input.extents.x2, surface->width) -
-					      (geometry.x + geometry.width);
-		window_margin_right = max(window_margin_right,
-					  RDP_RAIL_WINDOW_RESIZE_MARGIN);
+			if (min(surface->input.extents.x2, surface->width) > (geometry.x + geometry.width))
+				window_margin_right = min(surface->input.extents.x2, surface->width) -
+						      (geometry.x + geometry.width);
+			window_margin_right = max(window_margin_right,
+						  RDP_RAIL_WINDOW_RESIZE_MARGIN);
 
-		if (min(surface->input.extents.y2, surface->height) > (geometry.y + geometry.height))
-			window_margin_bottom = min(surface->input.extents.y2, surface->height) -
+			if (min(surface->input.extents.y2, surface->height) > (geometry.y + geometry.height))
+				window_margin_bottom = min(surface->input.extents.y2, surface->height) -
 					       (geometry.y + geometry.height);
-		window_margin_bottom = max(window_margin_bottom,
-					   RDP_RAIL_WINDOW_RESIZE_MARGIN);
+			window_margin_bottom = max(window_margin_bottom,
+						   RDP_RAIL_WINDOW_RESIZE_MARGIN);
+		}
 
 		/* offset window origin by window geometry */
 		newClientPos.x += geometry.x;
@@ -2138,7 +2140,8 @@ rdp_rail_update_window(struct weston_surface *surface,
 				     &newClientPos.width,
 				     &newClientPos.height);
 
-		if (is_window_shadow_remoting_disabled(peer_ctx)) {
+		if (is_window_shadow_remoting_disabled(peer_ctx) ||
+			rail_state->isWindowSnapped) {
 			to_client_coordinate(peer_ctx, surface->output,
 					     &window_margin_left,
 					     &window_margin_top,
@@ -2306,11 +2309,14 @@ rdp_rail_update_window(struct weston_surface *surface,
 		}
 
 		if (is_window_shadow_remoting_disabled(peer_ctx)) {
-			if (rail_state->forceUpdateWindowState ||
-			    rail_state->window_margin_left != window_margin_left ||
-			    rail_state->window_margin_top != window_margin_top ||
-			    rail_state->window_margin_right != window_margin_right ||
-			    rail_state->window_margin_bottom != window_margin_bottom) {
+			/* Due to how mstsc/msrdc works, window margin must not be set
+			   while window is snapped unless they are changed. */
+			if ((rail_state->forceUpdateWindowState &&
+				!rail_state->isWindowSnapped) ||
+				rail_state->window_margin_left != window_margin_left ||
+				rail_state->window_margin_top != window_margin_top ||
+				rail_state->window_margin_right != window_margin_right ||
+				rail_state->window_margin_bottom != window_margin_bottom) {
 				/* add resize margin area */
 				window_order_info.fieldFlags |= WINDOW_ORDER_FIELD_RESIZE_MARGIN_X |
 								WINDOW_ORDER_FIELD_RESIZE_MARGIN_Y;
@@ -2626,7 +2632,8 @@ rdp_rail_update_window(struct weston_surface *surface,
 			}
 			/* damage_box represents damaged area in contentBuffer */
 			/* if it's not remoting window shadow, exclude the area from damage_box */
-			if (is_window_shadow_remoting_disabled(peer_ctx)) {
+			if (is_window_shadow_remoting_disabled(peer_ctx) ||
+				rail_state->isWindowSnapped) {
 				if (damage_box.x1 < content_buffer_window_geometry.x)
 					damage_box.x1 = content_buffer_window_geometry.x;
 				if (damage_box.x2 > content_buffer_window_geometry.x + content_buffer_window_geometry.width)
@@ -3054,8 +3061,11 @@ rdp_rail_sync_window_zorder(struct weston_compositor *compositor)
 	if (!b->enable_window_zorder_sync)
 		return;
 
+	numWindowId = peer_ctx->windowId.id_used;
+	if (numWindowId == 0)
+		return;
 	/* +1 for marker window (aka proxy_surface) */
-	numWindowId = peer_ctx->windowId.id_used + 1;
+	numWindowId++;
 	windowIdArray = xzalloc(numWindowId * sizeof(uint32_t));
 
 	rdp_debug_verbose(b, "Dump Window Z order\n");
@@ -3083,21 +3093,22 @@ rdp_rail_sync_window_zorder(struct weston_compositor *compositor)
 		}
 	}
 	assert(iCurrent <= numWindowId);
-	assert(iCurrent > 0);
-	rdp_debug_verbose(b, "    send Window Z order: numWindowIds:%d\n",
-			  iCurrent);
+	if (iCurrent > 0) {
+		rdp_debug_verbose(b, "    send Window Z order: numWindowIds:%d\n",
+				  iCurrent);
 
-	window_order_info.fieldFlags = WINDOW_ORDER_TYPE_DESKTOP |
-				       WINDOW_ORDER_FIELD_DESKTOP_ZORDER |
-				       WINDOW_ORDER_FIELD_DESKTOP_ACTIVE_WND;
-	monitored_desktop_order.activeWindowId = windowIdArray[0];
-	monitored_desktop_order.numWindowIds = iCurrent;
-	monitored_desktop_order.windowIds = windowIdArray;
+		window_order_info.fieldFlags = WINDOW_ORDER_TYPE_DESKTOP |
+					       WINDOW_ORDER_FIELD_DESKTOP_ZORDER |
+					       WINDOW_ORDER_FIELD_DESKTOP_ACTIVE_WND;
+		monitored_desktop_order.activeWindowId = windowIdArray[0];
+		monitored_desktop_order.numWindowIds = iCurrent;
+		monitored_desktop_order.windowIds = windowIdArray;
 
-	client->context->update->window->MonitoredDesktop(client->context,
-							  &window_order_info,
-							  &monitored_desktop_order);
-	client->DrainOutputBuffer(client);
+		client->context->update->window->MonitoredDesktop(client->context,
+								  &window_order_info,
+								  &monitored_desktop_order);
+		client->DrainOutputBuffer(client);
+	}
 
 Exit:
 	free(windowIdArray);
@@ -3456,9 +3467,20 @@ rdp_rail_peer_activate(freerdp_peer* client)
 
 		rdp_debug(b, "Server AppList caps version:%d\n", RDPAPPLIST_CHANNEL_VERSION);
 		app_list_caps.version = RDPAPPLIST_CHANNEL_VERSION;
+		rdp_debug(b, "    appListProviderName:%s\n", b->rdprail_shell_name);
 		if (!utf8_string_to_rail_string(b->rdprail_shell_name,
 						&app_list_caps.appListProviderName))
 			goto error_exit;
+#if RDPAPPLIST_CHANNEL_VERSION >= 4
+		/* assign unique id */
+		char *s = getenv("WSLG_SERVICE_ID");
+		if (!s)
+			s = b->rdprail_shell_name;
+		rdp_debug(b, "    appListProviderUniqueId:%s\n", s);
+		if (!utf8_string_to_rail_string(s,
+						&app_list_caps.appListProviderUniqueId))
+			goto error_exit;
+#endif /* RDPAPPLIST_CHANNEL_VERSION >= 4 */
 		if (applist_ctx->ApplicationListCaps(applist_ctx, &app_list_caps) != CHANNEL_RC_OK)
 			goto error_exit;
 		free(app_list_caps.appListProviderName.string);
@@ -4620,6 +4642,7 @@ rdp_rail_notify_app_list(void *rdp_backend,
 	rdp_debug(b, "    newAppId: %d\n", app_list_data->newAppId);
 	rdp_debug(b, "    deleteAppId: %d\n", app_list_data->deleteAppId);
 	rdp_debug(b, "    deleteAppProvider: %d\n", app_list_data->deleteAppProvider);
+	rdp_debug(b, "    associateWindowId: %d\n", app_list_data->associateWindowId);
 	rdp_debug(b, "    appId: %s\n", app_list_data->appId);
 	rdp_debug(b, "    appGroup: %s\n", app_list_data->appGroup);
 	rdp_debug(b, "    appExecPath: %s\n", app_list_data->appExecPath);
@@ -4627,8 +4650,35 @@ rdp_rail_notify_app_list(void *rdp_backend,
 	rdp_debug(b, "    appDesc: %s\n", app_list_data->appDesc);
 	rdp_debug(b, "    appIcon: %p\n", app_list_data->appIcon);
 	rdp_debug(b, "    appProvider: %s\n", app_list_data->appProvider);
+	rdp_debug(b, "    appWindowId: 0x%x\n", app_list_data->appWindowId);
 
-	if (app_list_data->deleteAppId) {
+	if (app_list_data->associateWindowId) {
+		RDPAPPLIST_ASSOCIATE_WINDOW_ID_PDU associate_window_id = {};
+
+		assert(app_list_data->appProvider == NULL);
+		associate_window_id.flags = RDPAPPLIST_FIELD_ID | RDPAPPLIST_FIELD_WINDOW_ID;
+		associate_window_id.appWindowId = app_list_data->appWindowId;
+		if (app_list_data->appId == NULL ||
+		    !utf8_string_to_rail_string(app_list_data->appId, &associate_window_id.appId))
+			goto Exit_associateWindowId;
+
+		if (app_list_data->appGroup &&
+		    utf8_string_to_rail_string(app_list_data->appGroup, &associate_window_id.appGroup)) {
+			associate_window_id.flags |= RDPAPPLIST_FIELD_GROUP;
+		}
+		if (app_list_data->appExecPath &&
+		    utf8_string_to_rail_string(app_list_data->appExecPath, &associate_window_id.appExecPath)) {
+			associate_window_id.flags |= RDPAPPLIST_FIELD_EXECPATH;
+		}
+		if (app_list_data->appDesc &&
+		    utf8_string_to_rail_string(app_list_data->appDesc, &associate_window_id.appDesc)) {
+			associate_window_id.flags |= RDPAPPLIST_FIELD_DESC;
+		}
+		applist_ctx->AssociateWindowId(applist_ctx, &associate_window_id);
+	Exit_associateWindowId:
+		free(associate_window_id.appId.string);
+		free(associate_window_id.appGroup.string);
+	} else if (app_list_data->deleteAppId) {
 		RDPAPPLIST_DELETE_APPLIST_PDU delete_app_list = {};
 
 		assert(app_list_data->appProvider == NULL);

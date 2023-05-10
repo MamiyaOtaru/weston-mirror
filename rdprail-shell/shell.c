@@ -44,6 +44,7 @@
 #include <libweston/config-parser.h>
 #include "shared/helpers.h"
 #include "shared/timespec-util.h"
+#include "shared/image-loader.h"
 #include <libweston-desktop/libweston-desktop.h>
 #include <libweston/libweston.h>
 #include <libweston/backend.h>
@@ -124,6 +125,13 @@ struct shell_surface {
 		struct weston_view *black_view;
 	} fullscreen;
 
+	struct {
+		bool grab_unmaximized;
+		int32_t saved_surface_width;
+		int32_t saved_width;
+		int32_t saved_height;
+	} maximized;
+
 	struct weston_output *fullscreen_output;
 	struct weston_output *output;
 	struct wl_listener output_destroy_listener;
@@ -164,6 +172,10 @@ struct shell_surface {
 		bool is_default_icon_used;
 		bool is_icon_set;
 	} icon;
+
+	struct {
+		bool is_window_app_id_associated;
+	} app_id;
 
 	struct wl_listener metadata_listener;
 };
@@ -215,7 +227,10 @@ struct shell_seat {
 
 static const struct weston_pointer_grab_interface move_grab_interface;
 
+static void set_maximized(struct shell_surface *shsurf, bool maximized);
+
 static void grab_unsnap_motion(struct weston_pointer_grab *grab);
+static void grab_unmaximized_motion(struct weston_pointer_grab *grab);
 
 static struct desktop_shell *
 shell_surface_get_shell(struct shell_surface *shsurf);
@@ -788,14 +803,14 @@ shell_configuration(struct desktop_shell *shell)
 	/* default icon path is provided from WSL via enviromment variable */
 	s = getenv("WSL2_DEFAULT_APP_ICON");
 	if (s && (strcmp(s, "disabled") != 0))
-		shell->image_default_app_icon = load_icon_image(shell, s);
+		shell->image_default_app_icon = load_image(s);
 	shell_rdp_debug(shell, "RDPRAIL-shell: WSL2_DEFAULT_APP_ICON:%s (loaded:%s)\n",
 		s, shell->image_default_app_icon ? "yes" : "no");
 
 	/* default overlay icon path is provided from WSL via enviromment variable */
 	s = getenv("WSL2_DEFAULT_APP_OVERLAY_ICON");
 	if (s && (strcmp(s, "disabled") != 0))
-		shell->image_default_app_overlay_icon = load_icon_image(shell, s);
+		shell->image_default_app_overlay_icon = load_image(s);
 	shell_rdp_debug(shell, "RDPRAIL-shell: WSL2_DEFAULT_APP_OVERLAY_ICON:%s (loaded:%s)\n",
 		s, shell->image_default_app_overlay_icon ? "yes" : "no");
 
@@ -1246,15 +1261,23 @@ move_grab_motion(struct weston_pointer_grab *grab,
 
 	/* if local move is expected, but recieved the mouse move,
 	   then cacenl local move. */
-	if (shsurf->shell->is_localmove_pending) {
+	if (shsurf->shell->is_localmove_pending &&
+		(pointer->grab_x != pointer->x ||
+		 pointer->grab_y != pointer->y)) {
 		shell_rdp_debug_verbose(shsurf->shell, "%s: mouse move is detected while attempting local move\n", __func__);
 		shsurf->shell->is_localmove_pending = false;
 	}
 
 	surface = weston_desktop_surface_get_surface(shsurf->desktop_surface);
 
-	if (shsurf->snapped.is_snapped) {
+	if (shsurf->snapped.is_snapped &&
+		(pointer->grab_x != pointer->x ||
+		 pointer->grab_y != pointer->y)) {
 		grab_unsnap_motion(grab);
+	} else if (shsurf->state.maximized &&
+		(pointer->grab_x != pointer->x ||
+		 pointer->grab_y != pointer->y)) {
+		grab_unmaximized_motion(grab);
 	} else {
 		constrain_position(move, &cx, &cy);
 		weston_view_set_position(shsurf->view, cx, cy);
@@ -1309,8 +1332,9 @@ surface_move(struct shell_surface *shsurf, struct weston_pointer *pointer,
 		return -1;
 
 	if (shsurf->grabbed ||
-	    weston_desktop_surface_get_fullscreen(shsurf->desktop_surface) ||
-	    weston_desktop_surface_get_maximized(shsurf->desktop_surface))
+	    weston_desktop_surface_get_fullscreen(shsurf->desktop_surface)/* ||
+	    // RAIL shell to allow unmaximize by dragging title bar 
+	    weston_desktop_surface_get_maximized(shsurf->desktop_surface) */)
 		return 0;
 
 	move = malloc(sizeof *move);
@@ -1840,20 +1864,27 @@ unset_maximized(struct shell_surface *shsurf)
 	shsurf->saved_showstate_valid = false;
 
 	if (shsurf->snapped.is_snapped) {
-		/* Restore to snap state.
-		 */
-		weston_desktop_surface_set_size(shsurf->desktop_surface, shsurf->snapped.width, shsurf->snapped.height);
-		weston_view_set_position(shsurf->view, shsurf->snapped.x, shsurf->snapped.y);
-	} else {
-		/* Restore to previous size or make up one if the window started maximized.
-		 */
+		/* If previously snapped state, don't go back to snap, but restore */
+		/* weston_desktop_surface_set_size() expects the size in window geometry coordinates */
+		/* saved_width and saved_height is already based on window geometry. */
+		weston_desktop_surface_set_size(
+			shsurf->desktop_surface,
+			shsurf->snapped.saved_width, shsurf->snapped.saved_height);
+		weston_view_set_position(shsurf->view, 
+			shsurf->snapped.saved_x, shsurf->snapped.saved_y);
+		shsurf->snapped.is_snapped = false;
+		rail_state->isWindowSnapped = false;
+	} else if (!shsurf->maximized.grab_unmaximized) {
+		/* Restore to previous position or make up one if the window started maximized.
+		   if window is not being grabbed */
 		if (shsurf->saved_position_valid)
 			weston_view_set_position(shsurf->view,
 						shsurf->saved_x, shsurf->saved_y);
 		else
 			weston_view_set_initial_position(shsurf);
-		shsurf->saved_position_valid = false;
 	}
+	shsurf->saved_position_valid = false;
+	shsurf->maximized.grab_unmaximized = false;
 
 	if (shsurf->saved_rotation_valid) {
 		wl_list_insert(&shsurf->view->geometry.transformation_list,
@@ -1943,7 +1974,8 @@ grab_unsnap_motion(struct weston_pointer_grab *grab)
 		weston_desktop_surface_get_surface(shsurf->desktop_surface);
 	struct weston_surface_rail_state *rail_state =
 		(struct weston_surface_rail_state *)surface->backend_state;
-	int cx, cy, dx;
+	int cx, cy, geometry_offset;
+	float dx, move_dx;
 
 	if (!shsurf->snapped.is_snapped)
 		return;
@@ -1953,33 +1985,119 @@ grab_unsnap_motion(struct weston_pointer_grab *grab)
 
 	/* window is no longer in snap state */
 	shsurf->snapped.is_snapped = false;
+	rail_state->isWindowSnapped = false;
 	rail_state->showState_requested = RDP_WINDOW_SHOW;
 	shsurf->saved_showstate_valid = false;
+
+	geometry_offset = shsurf->snapped.saved_surface_width -
+			  shsurf->snapped.saved_width;
+	geometry_offset /= 2;
+
+	/* Reposition the window such that the mouse remain within the 
+	 * new bound of the window after resize. */
+	/* calc based on pointer position based on current (snapped) window size */
+	/* move->dx is offset of pointer position from window origin */
+	dx = wl_fixed_to_double(move->dx) / surface->width;
+	dx = fabsf(dx);
+	/* calc the distance based on unsnapped window size */
+	cx = shsurf->snapped.saved_width * dx;
+	/* add window geometry offset */
+	cx += geometry_offset;
+	/* obtain new window offset from current pointer position */
+	cx = wl_fixed_to_int(pointer->x) - cx;
+
+	/* adjust move->dx based on new position */
+	move_dx = wl_fixed_from_int(cx) - pointer->grab_x;
+
+	shell_rdp_debug_verbose(shsurf->shell, "%s: restore surface:%p at (%d,%d) size:%dx%d from (%d,%d) size:%dx%d\n",
+			__func__, surface,
+			cx, cy,
+			shsurf->snapped.saved_width, shsurf->snapped.saved_height,
+			(int)shsurf->view->geometry.x, (int)shsurf->view->geometry.y,
+			surface->width, surface->height);
+	shell_rdp_debug_verbose(shsurf->shell, "%s: restore surface:%p, geometry_offset:%d, grab_ratio:%f, move_dx:%d->%d\n",
+			__func__, surface, geometry_offset, dx,
+			wl_fixed_to_int(move->dx), wl_fixed_to_int(move_dx));
 
 	/* restore original size */
 	weston_desktop_surface_set_size(shsurf->desktop_surface,
 			shsurf->snapped.saved_width,
 			shsurf->snapped.saved_height);
 
+	/* update move_dx based on new position */
+	move->dx = move_dx;
+
+	/* and move to new position reletive to pointer */
+	constrain_position(move, &cx, &cy);
+	weston_view_set_position(shsurf->view, cx, cy);
+}
+
+static void
+grab_unmaximized_motion(struct weston_pointer_grab *grab)
+{
+	struct weston_pointer *pointer = grab->pointer;
+	struct weston_move_grab *move = (struct weston_move_grab *) grab;
+	struct shell_surface *shsurf = move->base.shsurf;
+	struct weston_surface *surface =
+		weston_desktop_surface_get_surface(shsurf->desktop_surface);
+	const struct weston_xwayland_surface_api *api;
+	int cx, cy, geometry_offset;
+	float dx, move_dx;
+
+	if (shsurf->maximized.grab_unmaximized)
+		return;
+
+	geometry_offset = shsurf->maximized.saved_surface_width -
+			  shsurf->maximized.saved_width;
+	geometry_offset /= 2;
+
 	/* Reposition the window such that the mouse remain within the 
 	 * new bound of the window after resize. */
-	dx = wl_fixed_to_int(move->dx);
-	if (abs(dx) < surface->width / 2) {
-		/* keep left edge pos, resize from right edge */
-		cx = shsurf->view->geometry.x;
-	} else {
-		/* keep right edge pos, resize from left edge */
-		cx = (shsurf->view->geometry.x + surface->width) - shsurf->snapped.saved_surface_width;
-	}
-	cy = shsurf->view->geometry.y + wl_fixed_to_int(move->dy);
-	weston_view_set_position(shsurf->view, cx, cy);
-	move->dx = wl_fixed_from_int(cx - wl_fixed_to_int(pointer->x));
+	/* calc based on pointer position based on current (maximized) window size */
+	/* move->dx is offset of pointer position from window origin */
+	dx = wl_fixed_to_double(move->dx) / surface->width;
+	dx = fabsf(dx);
+	/* calc the distance based on restored window size */
+	cx = shsurf->maximized.saved_width * dx;
+	/* add window geometry offset */
+	cx += geometry_offset;
+	/* obtain new window offset from current pointer position */
+	cx = wl_fixed_to_int(pointer->x) - cx;
 
-	shell_rdp_debug_verbose(shsurf->shell, "%s: restore surface:%p at (%d,%d) (%dx%d), new move_dx:%d\n",
-			__func__, surface, cx, cy,
-			shsurf->snapped.saved_width,
-			shsurf->snapped.saved_height,
-			wl_fixed_to_int(move->dx));
+	/* adjust move->dx based on new position */
+	move_dx = wl_fixed_from_int(cx) - pointer->grab_x;
+
+	shell_rdp_debug_verbose(shsurf->shell, "%s: restore surface:%p at (%d,%d) size:%dx%d from (%d,%d) size:%dx%d\n",
+			__func__, surface,
+			cx, cy,
+			shsurf->maximized.saved_width, shsurf->maximized.saved_height,
+			(int)shsurf->view->geometry.x, (int)shsurf->view->geometry.y,
+			surface->width, surface->height);
+	shell_rdp_debug_verbose(shsurf->shell, "%s: restore surface:%p, geometry_offset:%d, grab_ratio:%f, move_dx:%d->%d\n",
+			__func__, surface, geometry_offset, dx,
+			wl_fixed_to_int(move->dx), wl_fixed_to_int(move_dx));
+
+	/* restore from maximized */
+	api = shsurf->shell->xwayland_surface_api;
+	if (!api) {
+		api = weston_xwayland_surface_get_api(shsurf->shell->compositor);
+		shsurf->shell->xwayland_surface_api = api;
+	}
+	if (api && api->is_xwayland_surface(surface)) {
+		api->set_maximized(surface, false);
+	} else {
+		set_maximized(shsurf, false);
+	}
+
+	/* update move_dx based on new position */
+	move->dx = move_dx;
+
+	/* and move to new position reletive to pointer */
+	constrain_position(move, &cx, &cy);
+	weston_view_set_position(shsurf->view, cx, cy);
+
+	/* don't reset position at next commit */
+	shsurf->maximized.grab_unmaximized = true;
 }
 
 static struct desktop_shell *
@@ -2612,12 +2730,6 @@ desktop_surface_committed(struct weston_desktop_surface *desktop_surface,
 		wl_list_for_each(view, &surface->views, surface_link)
 			weston_view_update_transform(view);
 	}
-
-	if (!shsurf->icon.is_icon_set) {
-		/* TODO hook to meta data change notification */
-		shell_surface_set_window_icon(desktop_surface, 0, 0, 0, NULL, NULL);
-		shsurf->icon.is_icon_set = true;
-	}
 }
 
 static void
@@ -2793,6 +2905,7 @@ set_maximized(struct shell_surface *shsurf, bool maximized)
 		weston_desktop_surface_get_surface(shsurf->desktop_surface);
 	struct weston_surface_rail_state *rail_state =
 		(struct weston_surface_rail_state *)surface->backend_state;
+	struct weston_geometry geometry;
 	int32_t width = 0, height = 0;
 
 	if (!rail_state)
@@ -2816,6 +2929,12 @@ set_maximized(struct shell_surface *shsurf, bool maximized)
 		shell_surface_set_output(shsurf, output);
 
 		get_maximized_size(shsurf, &width, &height);
+
+		/* save current window size */
+		geometry = weston_desktop_surface_get_geometry(shsurf->desktop_surface);
+		shsurf->maximized.saved_surface_width = surface->width;
+		shsurf->maximized.saved_width = geometry.width;
+		shsurf->maximized.saved_height = geometry.height;
 	} else {
 		if (shsurf->saved_showstate_valid)
 			rail_state->showState_requested = shsurf->saved_showstate;
@@ -2923,6 +3042,7 @@ shell_backend_request_window_restore(struct weston_surface *surface)
 		weston_view_set_position(shsurf->view, 
 			shsurf->snapped.saved_x, shsurf->snapped.saved_y);
 		shsurf->snapped.is_snapped = false;
+		rail_state->isWindowSnapped = false;
 	} else if (shsurf->state.fullscreen) {
 		/* fullscreen is treated as normal (aka restored) state in
 		   Windows client, thus there should be not be 'restore'
@@ -2978,9 +3098,11 @@ shell_backend_request_window_snap(struct weston_surface *surface, int x, int y, 
 	struct weston_view *view;
 	struct shell_surface *shsurf = get_shell_surface(surface);
 	struct weston_geometry geometry;
+	struct weston_surface_rail_state *rail_state =
+		(struct weston_surface_rail_state *)surface->backend_state;
 
 	view = get_default_view(surface);
-	if (!view || !shsurf)
+	if (!view || !shsurf || !rail_state)
 		return;
 
 	if (shsurf->shell->is_localmove_pending) {
@@ -3023,6 +3145,7 @@ shell_backend_request_window_snap(struct weston_surface *surface, int x, int y, 
 		shsurf->snapped.saved_height = geometry.height;
 	}
 	shsurf->snapped.is_snapped = true;
+	rail_state->isWindowSnapped = true;
 
 	if (surface->width != width || surface->height != height) {
 		struct weston_desktop_surface *desktop_surface =
@@ -4138,7 +4261,10 @@ launch_desktop_shell_process(void *data)
 {
 	struct desktop_shell *shell = data;
 
-	assert(!shell->child.client);
+	/* check if it's already running */
+	if (shell->child.client)
+		return;
+
 	shell->child.client = weston_client_start(shell->compositor,
 						  shell->client);
 
@@ -4632,6 +4758,7 @@ shell_backend_get_app_id(void *shell_context, struct weston_surface *surface, ch
 {
 	struct desktop_shell *shell = (struct desktop_shell *)shell_context;
 	struct weston_desktop_surface *desktop_surface;
+	struct weston_surface_rail_state *rail_state; 
 	struct shell_surface *shsurf;
 	const struct weston_xwayland_surface_api *api; 
 	pid_t pid;
@@ -4652,30 +4779,34 @@ shell_backend_get_app_id(void *shell_context, struct weston_surface *surface, ch
 	if (!desktop_surface)
 		return -1;
 
-	/* obtain application id specified via wayland interface */
-	id = weston_desktop_surface_get_app_id(desktop_surface);
-	if (id) {
-		strncpy(app_id, id, app_id_size);
-	} else {
-		/* if app_id is not specified via wayland interface,
-		   obtain class name from X server for X app, and use as app_id */
-		shsurf = weston_desktop_surface_get_user_data(desktop_surface);
-		if (shsurf) {
-			api = shsurf->shell->xwayland_surface_api;
-			if (!api) {
-				api = weston_xwayland_surface_get_api(shsurf->shell->compositor);
-				shsurf->shell->xwayland_surface_api = api;
-			}
-			if (api && api->is_xwayland_surface(surface)) {
-				class_name = api->get_class_name(surface);
-				if (class_name) {
-					strncpy(app_id, class_name, app_id_size);
-					free(class_name);
-					/* app_id is from Xwayland */
-					is_wayland = false;
-				}
-			}
+	shsurf = weston_desktop_surface_get_user_data(desktop_surface);
+	if (!shsurf) 
+		return -1;
+
+	rail_state = (struct weston_surface_rail_state *)surface->backend_state;
+	if (!rail_state)
+		return -1;
+
+	/* first obtain class name from X server for X app, and use as app_id */
+	api = shsurf->shell->xwayland_surface_api;
+	if (!api) {
+		api = weston_xwayland_surface_get_api(shsurf->shell->compositor);
+		shsurf->shell->xwayland_surface_api = api;
+	}
+	if (api && api->is_xwayland_surface(surface)) {
+		class_name = api->get_class_name(surface);
+		if (class_name) {
+			strncpy(app_id, class_name, app_id_size);
+			free(class_name);
+			/* app_id is from Xwayland */
+			is_wayland = false;
 		}
+	}
+	/* if not, obtain application id specified via wayland interface */
+	if (app_id[0] == '\0') {
+		id = weston_desktop_surface_get_app_id(desktop_surface);
+		if (id) 
+			strncpy(app_id, id, app_id_size);
 	}
 
 	/* obtain pid for execuable path */
@@ -4697,8 +4828,21 @@ shell_backend_get_app_id(void *shell_context, struct weston_surface *surface, ch
 		strncpy(image_name, app_id, image_name_size);
 	}
 
-	shell_rdp_debug_verbose(shell, "shell_backend_get_app_id: 0x%p: pid:%d, app_id:%s, image_name:%s\n",
-		surface, pid, app_id, image_name);
+	shell_rdp_debug_verbose(shell, "shell_backend_get_app_id: 0x%p: pid:%d, app_id:%s, windowId:0x%x, image_name:%s\n",
+		surface, pid, app_id, rail_state->window_id, image_name);
+
+	/* obtain window icon for app */
+	if (!shsurf->icon.is_icon_set) {
+		/* TODO hook to meta data change notification */
+		shell_surface_set_window_icon(desktop_surface, 0, 0, 0, NULL, NULL);
+		shsurf->icon.is_icon_set = true;
+	}
+
+	/* associate window and app_id at client side */
+	if (!shsurf->app_id.is_window_app_id_associated && app_id[0] != '\0') {
+		app_list_associate_window_app_id(shsurf->shell, pid, app_id, rail_state->window_id);
+		shsurf->app_id.is_window_app_id_associated = true;
+	}
 
 	return pid;
 }

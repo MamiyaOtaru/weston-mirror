@@ -129,6 +129,7 @@ struct weston_rdprail_app_list_data {
 	bool newAppId;
 	bool deleteAppId;
 	bool deleteAppProvider;
+	bool associateWindowId;
 	char *appId;
 	char *appGroup;
 	char *appExecPath;
@@ -136,6 +137,7 @@ struct weston_rdprail_app_list_data {
 	char *appDesc;
 	char *appProvider;
 	pixman_image_t *appIcon;
+	uint32_t appWindowId;
 };
 
 struct weston_rdp_rail_window_pos {
@@ -234,6 +236,7 @@ struct weston_surface_rail_state {
 	uint32_t parent_window_id;
 	bool isCursor;
 	bool isWindowCreated;
+	bool isWindowSnapped;
 	uint32_t showState_requested;
 	uint32_t showState;
 	bool forceRecreateSurface;
