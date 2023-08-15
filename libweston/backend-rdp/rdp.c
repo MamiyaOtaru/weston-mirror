@@ -450,6 +450,22 @@ rdp_head_get_rdpmonitor(const struct weston_head *base)
 	return &h->config;
 }
 
+struct weston_output *
+rdp_output_get_primary(struct weston_compositor *compositor)
+{
+	struct rdp_backend *b = to_rdp_backend(compositor);
+	struct weston_head *iter;
+	wl_list_for_each(iter, &compositor->head_list, compositor_link) {
+		rdpMonitor *cur = rdp_head_get_rdpmonitor(iter);
+		if (cur->is_primary)
+			return iter->output;
+	}
+
+	rdp_debug_error(b, "%s: Didn't find primary output, return the first one\n", __func__);
+	return container_of(compositor->output_list.next,
+			    struct weston_output, link);
+}
+
 static int
 rdp_output_enable(struct weston_output *base)
 {
@@ -847,6 +863,14 @@ struct rdp_to_xkb_keyboard_layout {
 /* 0x50429 is for Dari (Afghanistan) */
 #define KBD_PERSIAN 0x50429
 #endif
+#ifndef KBD_FRENCH_STANDARD_BEPO
+/* 0x2040c is for French (Standard, Bepo) */
+#define KBD_FRENCH_STANDARD_BEPO 0x2040c
+#endif
+#ifndef KBD_FRENCH_STANDARD_AZERTY
+/* 0x1040c is for French (Standard, AZERTY) */
+#define KBD_FRENCH_STANDARD_AZERTY 0x1040c
+#endif
 
 static const
 struct rdp_to_xkb_keyboard_layout rdp_keyboards[] = {
@@ -871,6 +895,8 @@ struct rdp_to_xkb_keyboard_layout rdp_keyboards[] = {
 	{KBD_SPANISH_VARIATION, "es", "nodeadkeys"},
 	{KBD_FINNISH, "fi", 0},
 	{KBD_FRENCH, "fr", 0},
+	{KBD_FRENCH_STANDARD_BEPO, "fr", "bepo"},
+	{KBD_FRENCH_STANDARD_AZERTY, "fr", "afnor"},
 	{KBD_HEBREW, "il", 0},
 	{KBD_HEBREW_STANDARD, "il", "basic"},
 	{KBD_HUNGARIAN, "hu", 0},
@@ -904,6 +930,7 @@ struct rdp_to_xkb_keyboard_layout rdp_keyboards[] = {
 	{KBD_SLOVENIAN, "si", 0},
 	{KBD_ESTONIAN, "ee", 0},
 	{KBD_LATVIAN, "lv", 0},
+	{KBD_LITHUANIAN, "lt", 0},
 	{KBD_LITHUANIAN_IBM, "lt", "ibm"},
 	// 0x429 (KBD_FARSI) is for Persian(Iran)
 	// TODO: define exact match with Windows layout in Xkb.
@@ -956,7 +983,7 @@ struct rdp_to_xkb_keyboard_layout rdp_keyboards[] = {
 	{KBD_INUKTITUT_LATIN, "ca", "ike"},
 	{KBD_CANADIAN_FRENCH_LEGACY, "ca", "fr-legacy"},
 	{KBD_SERBIAN_CYRILLIC, "rs", 0},
-	{KBD_CANADIAN_FRENCH, "ca", "fr-legacy"},
+	{KBD_CANADIAN_FRENCH, "ca", 0},
 	{KBD_SWISS_FRENCH, "ch", "fr"},
 	{KBD_BOSNIAN, "ba", 0},
 	{KBD_IRISH, 0, 0},
@@ -1981,6 +2008,7 @@ rdp_generate_session_tls(struct rdp_backend *b)
 static const struct weston_rdp_output_api api = {
 	rdp_head_get_rdpmonitor,
 	rdp_output_set_mode,
+	rdp_output_get_primary,
 };
 
 static int create_vsock_fd(int port)
